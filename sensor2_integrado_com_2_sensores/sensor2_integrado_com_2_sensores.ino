@@ -7,8 +7,8 @@
 // =====================
 // Dados da rede Wi-Fi
 // =====================
-const char ssid[] = "TP-Link_2536";
-const char password[] = "Lena1123581321@";
+const char ssid[] = "caprinovi/nesatec";
+const char password[] = "C@prinovi";
 
 // =====================
 // Configurações ThingSpeak
@@ -131,7 +131,7 @@ void loop() {
       ThingSpeak.setField(2, umidade_1);
       ThingSpeak.setField(3, condutividade_1);
 
-      ThingSpeak.setField(4, temperatura_1);
+      ThingSpeak.setField(4, temperatura_2);
       ThingSpeak.setField(5, umidade_2);
       ThingSpeak.setField(6, condutividade_2);
 
@@ -321,7 +321,7 @@ void readSensor_2(float *temperatura, float *umidade, float *condutividade) {
  else {
 
   Serial.println("Falha na leitura da condutividade");
-  *condutividade = 0;
+  *condutividade = -1;
 
  }
 
