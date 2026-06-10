@@ -8,8 +8,8 @@
 // =====================
 // Dados da rede Wi-Fi
 // =====================
-const char ssid[] = "TP-Link_2536";
-const char password[] = "Lena1123581321@";
+const char ssid[] = "caprinovi/nesatec";
+const char password[] = "C@prinovi";
 
 // =====================
 // Configurações ThingSpeak
@@ -43,7 +43,7 @@ HardwareSerial mod(1);  // UART1 para o sensor
 // Variáveis globais
 // =====================
 long prevMillisThingSpeak = 0;
-int intervalThingSpeak = 60000;
+int intervalThingSpeak = 900000;
 volatile uint32_t contadorLeituras = 0;
 
 // Protótipos
@@ -339,7 +339,7 @@ void readSensor_2(float *temperatura, float *umidade, float *condutividade) {
  else {
 
   Serial.println("Falha na leitura da condutividade");
-  *condutividade = 0;
+  *condutividade = -1;
 
  }
 
