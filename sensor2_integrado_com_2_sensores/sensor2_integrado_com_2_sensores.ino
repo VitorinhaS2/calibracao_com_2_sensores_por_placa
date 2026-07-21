@@ -3,6 +3,7 @@
 #include <ThingSpeak.h>
 #include <WiFi.h>
 #include "HardwareSerial.h"
+#include "sd_read_write.h"
 
 // =====================
 // Dados da rede Wi-Fi
@@ -23,6 +24,11 @@ const char *WRITE_API = "NBK1ZYXRW6K5ZEST";
 static SSD1306Wire display(0x3C, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
 // =====================
+// SPI (SD Card)
+// =====================
+SPIClass sd_spi(HSPI);
+
+// =====================
 // UART do sensor RS485
 // =====================
 #define RX_SENSOR 33
@@ -37,12 +43,15 @@ HardwareSerial mod(1);  // UART1 para o sensor
 // Variáveis globais
 // =====================
 long prevMillisThingSpeak = 0;
-int intervalThingSpeak = 60000;
+int intervalThingSpeak = 300000;
 volatile uint32_t contadorLeituras = 0;
 
 // Protótipos
+void sdInit(void);
+void gravaDados(float temp_1, float umid_1, float cond_1, float temp_2, float umid_2, float cond_2);
 void readSensor_1(float *temperatura, float *umidade, float *condutividade);
 void readSensor_2(float *temperatura, float *umidade, float *condutividade);
+uint16_t ModRTU_CRC(uint8_t buf[], int len);
 
 //=====================
 // Energia externa
@@ -78,6 +87,21 @@ void setup() {
   digitalWrite(bussControl, LOW);
   digitalWrite(sensorControl, LOW);
 
+  // Inicializa SD
+  sdInit();
+
+  File file = SD.open("/data.txt");
+  if (!file) {
+    Serial.println("Criando arquivo no SD...");
+    writeFile(
+    SD,
+    "/data.csv",
+    "Leitura,Data,Hora,Temperatura_S1(°C),Umidade_S1(%),Condutividade_S1(uS/cm),Temperatura_S2(°C),Umidade_S2(%),Condutividade_S2(uS/cm),Millis\r\n"); 
+}else {
+    Serial.println("Arquivo já existe.");
+  }
+  file.close();
+
   // Conecta Wi-Fi
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
@@ -90,6 +114,19 @@ void setup() {
   }
   Serial.println("\nWiFi conectado!");
   Serial.println(WiFi.localIP());
+
+  configTime(-3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+struct tm timeinfo;
+
+while(!getLocalTime(&timeinfo))
+{
+    Serial.println("Aguardando sincronização NTP...");
+    delay(1000);
+}
+
+Serial.println("Relógio sincronizado!");
+
 
   // Inicializa ThingSpeak
   ThingSpeak.begin(client);
@@ -119,9 +156,25 @@ void loop() {
 
    readSensor_1(&temperatura_1, &umidade_1, &condutividade_1);
    delay(200);
+   
+   for (int tentativa = 1; tentativa <= 3; tentativa++) {
 
-   readSensor_2(&temperatura_2, &umidade_2, &condutividade_2);
-   delay(200);
+    readSensor_2(&temperatura_2, &umidade_2, &condutividade_2);
+
+    // Sai se a leitura foi válida
+    if (!(temperatura_2 == 0 &&
+          umidade_2 == 0 &&
+          condutividade_2 == -1))
+    {
+        if (tentativa > 1) {
+            Serial.printf("Sensor 2 respondeu na tentativa %d\n", tentativa);
+        }
+        break;
+    }
+     Serial.printf("Tentativa %d falhou!\n", tentativa);
+
+    delay(300);
+}
 
    // Envio ThingSpeak
   if (millis() - prevMillisThingSpeak > intervalThingSpeak) {
@@ -163,12 +216,27 @@ void loop() {
     Serial.printf("C: %.0f uS/cm\n", condutividade_2);
 
     // Display
+    // Display
     display.clear();
-    display.setFont(ArialMT_Plain_16);
-    display.drawString(64, 0, "T: " + String(temperatura_1, 1) + "C");
-    display.drawString(64, 20, "U: " + String(umidade_1, 1) + "%");
-    display.drawString(64, 40, "C: " + String(condutividade_1, 0) + "uS/cm");
+    display.setFont(ArialMT_Plain_10);
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+
+    // Sensor 1
+    display.drawString(0, 0,  "S1");
+    display.drawString(0, 12, "T:" + String(temperatura_1,1) + "C");
+    display.drawString(0, 24, "U:" + String(umidade_1,1) + "%");
+    display.drawString(0, 36, "C:" + String(condutividade_1,0));
+
+    // Sensor 2
+    display.drawString(64, 0,  "S2");
+    display.drawString(64, 12, "T:" + String(temperatura_2,1) + "C");
+    display.drawString(64, 24, "U:" + String(umidade_2,1) + "%");
+    display.drawString(64, 36, "C:" + String(condutividade_2,0));
+
     display.display();
+
+    // Grava no SD
+    gravaDados(temperatura_1, umidade_1, condutividade_1, temperatura_2, umidade_2, condutividade_2);
 
     delay(500);
 }
@@ -221,7 +289,7 @@ void readSensor_1(float *temperatura, float *umidade, float *condutividade) {
     *condutividade = rawCond;
   } 
   else {
-    Serial.println("Falha na leitura do sensor RS485");
+    Serial.println("Falha na leitura do sensor 1");
     *temperatura = *umidade = *condutividade = 0;
   }
 
@@ -266,64 +334,127 @@ void readSensor_2(float *temperatura, float *umidade, float *condutividade) {
   }
 
   
-  if (i >= 9) {
-    uint16_t rawHum  = (buffer[3] << 8) | buffer[4];
-    uint16_t rawTemp = (buffer[5] << 8) | buffer[6];
-    uint16_t rawCond = (buffer[7] << 8) | buffer[8];
+  if (i == 9) {
 
-    *umidade = rawHum / 10.0;
-    *temperatura = rawTemp / 10.0;
-  } 
-  else {
-    Serial.println("Falha na leitura do sensor 2");
-    *temperatura = *umidade = 0;
-  }
-  // =====================
- // LEITURA CONDUTIVIDADE
- // =====================
+    uint16_t crcCalculado = ModRTU_CRC(buffer, 7);
 
- const uint8_t CMD_EC[] = {
-  0x01, 0x03, 0x00, 0x15,
-  0x00, 0x01, 0x95, 0xCE
- };
+    uint16_t crcRecebido =
+        buffer[7] |
+        (buffer[8] << 8);
 
- delay(100);
+    if (crcCalculado == crcRecebido &&
+        buffer[0] == 0x01 &&
+        buffer[1] == 0x03)
+    {
 
- // Limpa buffer
- while (mod.available()) mod.read();
+        uint16_t rawHum  = (buffer[3] << 8) | buffer[4];
+        uint16_t rawTemp = (buffer[5] << 8) | buffer[6];
 
- // Envia comando EC
- digitalWrite(RE, HIGH);
- delay(5);
+        *umidade = rawHum / 10.0;
+        *temperatura = rawTemp / 10.0;
 
- mod.write(CMD_EC, sizeof(CMD_EC));
- mod.flush();
+    }
+    else {
 
- digitalWrite(RE, LOW);
+        Serial.println("CRC inválido Sensor 2");
 
- // Aguarda resposta
- i = 0;
- timeout = millis();
+        *temperatura = 0;
+        *umidade = 0;
 
- while (i < 7 && (millis() - timeout) < 1000) {
-  if (mod.available()) {
-    buffer[i++] = mod.read();
-  }
- }
+    }
 
- if (i >= 7) {
+}
+    // =====================
+// LEITURA CONDUTIVIDADE
+// =====================
 
-  uint16_t rawEC = (buffer[3] << 8) | buffer[4];
+const uint8_t CMD_EC[] = {
+    0x01, 0x03, 0x00, 0x15,
+    0x00, 0x01, 0x95, 0xCE
+};
 
-  *condutividade = rawEC;
+uint16_t rawEC = 0;
+bool leituraValida = false;
 
- }
- else {
+// Faz até 3 tentativas
+for (int tentativa = 1; tentativa <= 3; tentativa++) {
 
-  Serial.println("Falha na leitura da condutividade");
-  *condutividade = -1;
+    if (tentativa > 1) {
+        Serial.printf("Nova tentativa EC (%d)\n", tentativa);
+        delay(300);
+    }
 
- }
+    while (mod.available()) mod.read();
+
+    digitalWrite(RE, HIGH);
+    delay(5);
+
+    mod.write(CMD_EC, sizeof(CMD_EC));
+    mod.flush();
+
+    digitalWrite(RE, LOW);
+
+    i = 0;
+    timeout = millis();
+
+    while (i < 7 && (millis() - timeout) < 1000) {
+
+        if (mod.available()) {
+
+            buffer[i++] = mod.read();
+
+        }
+
+    }
+
+   if(i == 7)
+{
+
+    uint16_t crcCalculado = ModRTU_CRC(buffer,5);
+
+    uint16_t crcRecebido =
+        buffer[5] |
+        (buffer[6] << 8);
+
+    if(crcCalculado == crcRecebido &&
+       buffer[0] == 0x01 &&
+       buffer[1] == 0x03)
+    {
+
+        rawEC = (buffer[3] << 8) | buffer[4];
+
+        Serial.print("EC recebida: ");
+        Serial.println(rawEC);
+
+        if(rawEC != 0)
+        {
+            leituraValida = true;
+            break;
+        }
+
+        Serial.println("EC = 0");
+
+    }
+    else
+    {
+
+        Serial.println("CRC inválido na EC");
+
+    }
+
+}
+
+if (leituraValida) {
+
+    *condutividade = rawEC;
+
+}
+else {
+
+    // mantém 0 caso realmente tenha vindo 0
+    *condutividade = rawEC;
+
+}
 
   //  DESLIGA SENSOR
   digitalWrite(sensorControl, LOW);
@@ -331,7 +462,85 @@ void readSensor_2(float *temperatura, float *umidade, float *condutividade) {
 
   digitalWrite(bussControl, LOW);
 }
+}
 
+// =====================
+// Inicialização do SD
+// =====================
+void sdInit(void) {
+  sd_spi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS, sd_spi)) {
+    Serial.println("Falha ao montar SD");
+    return;
+  }
+  Serial.println("Cartão SD pronto.");
+}
 
+// =====================
+// Grava dados no SD
+// =====================
+void gravaDados(float temp_1,
+                float umid_1,
+                float cond_1,
+                float temp_2,
+                float umid_2,
+                float cond_2)
+{
 
+    struct tm timeinfo;
 
+    String data = "SemData";
+    String hora = "SemHora";
+
+    if(getLocalTime(&timeinfo))
+    {
+        char dataBuffer[11];
+        char horaBuffer[9];
+
+        strftime(dataBuffer,sizeof(dataBuffer),"%d/%m/%Y",&timeinfo);
+        strftime(horaBuffer,sizeof(horaBuffer),"%H:%M:%S",&timeinfo);
+
+        data = String(dataBuffer);
+        hora = String(horaBuffer);
+    }
+
+    String linha =
+        String(contadorLeituras) + "," +
+        data + "," +
+        hora + "," +
+        String(temp_1,1) + "," +
+        String(umid_1,1) + "," +
+        String(cond_1,0) + "," +
+        String(temp_2,1) + "," +
+        String(umid_2,1) + "," +
+        String(cond_2,0) + "," +
+        String(millis()) +
+        "\r\n";
+
+    appendFile(SD,"/data.csv",linha.c_str());
+}
+
+uint16_t ModRTU_CRC(uint8_t buf[], int len)
+{
+    uint16_t crc = 0xFFFF;
+
+    for (int pos = 0; pos < len; pos++)
+    {
+        crc ^= (uint16_t)buf[pos];
+
+        for (int i = 0; i < 8; i++)
+        {
+            if (crc & 0x0001)
+            {
+                crc >>= 1;
+                crc ^= 0xA001;
+            }
+            else
+            {
+                crc >>= 1;
+            }
+        }
+    }
+
+    return crc;
+}
